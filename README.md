@@ -8,7 +8,6 @@ LuCI 流量统计页：实时速率折线图 + vnStat 历史图表，专为 **PO
 - **动态纵轴**：刻度随当前峰值自动调整（1/1.5/2/2.5/3/4/5/6/8/10 × 10^n 档位），左侧留白自适应刻度文字宽度
 - **历史图表**：24 小时（5 分钟粒度）/ 按日 / 按月，数据来自 vnStat，自动剔除建库基线假点
 - **接口跟随 vnStat**：接口下拉只显示 `/etc/config/vnstat` 中勾选且有计数器的接口，勾选变化每秒自动同步
-- **状态首页卡片**：LuCI 概览页新增"流量统计"卡片（仿 PON 光模块卡片），显示主要接口实时速率 + 今日总量，一键跳转完整图表
 - **默认接口智能选择**：优先 pon0（MAC/DMA 级计数，不受硬件加速转发影响），避免 pppoe-wan / br-lan 等软件接口在 flow offload 下的计数失真
 
 ## 依赖
@@ -52,7 +51,6 @@ opkg install ./luci-app-traffic_1.0.0-1_all.ipk  # 21.02/22.03/23.05 (opkg)
 
 ```
 htdocs/luci-static/resources/view/traffic/overview.js      流量统计页前端
-htdocs/luci-static/resources/view/status/include/16_traffic.js  状态首页卡片
 root/usr/share/rpcd/ucode/luci.traffic                      rpcd 后端（ucode）
 root/usr/share/rpcd/acl.d/luci-app-traffic.json             ACL
 root/usr/share/luci/menu.d/luci-app-traffic.json            菜单（状态 → 网络流量）
