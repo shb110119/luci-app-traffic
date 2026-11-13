@@ -1,0 +1,100 @@
+name: Build luci-app-traffic (ipk + apk)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: snapshot-apk
+            base: https://downloads.openwrt.org/snapshots/targets/x86/64/
+          - name: 23.05-ipk
+            base: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 定位并下载 OpenWrt SDK
+        run: |
+          FILE=$(curl -sL "${{ matrix.base }}" | grep -oE 'openwrt-sdk-[^"]*\.(tar\.xz|tar\.zst)' | sort -u | tail -1)
+          [ -n "$FILE" ] || { echo "未找到 SDK 文件"; exit 1; }
+          echo "SDK 文件: $FILE"
+          curl -sL -o sdk.tar "${{ matrix.base }}$FILE"
+          case "$FILE" in
+            *.zst) tar --zstd -xf sdk.tar ;;
+            *)     tar -xJf sdk.tar ;;
+          esac
+          mv openwrt-sdk-* sdk
+
+      - name: 更新并安装 feeds
+        working-directory: sdk
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 放入包源码
+        run: |
+          cp -a "$GITHUB_WORKSPACE" sdk/package/luci-app-traffic
+          rm -rf sdk/package/luci-app-traffic/.git sdk/package/luci-app-traffic/.github sdk/package/luci-app-traffic/docs
+
+      - name: 编译 luci-app-traffic
+        working-directory: sdk
+        run: |
+          echo "CONFIG_PACKAGE_luci-app-traffic=m" >> .config
+          make defconfig
+          make package/luci-app-traffic/compile V=s -j"$(nproc)" \
+            || make package/luci-app-traffic/compile V=s -j1
+
+      - name: 收集产物
+        run: |
+          mkdir -p out
+          find sdk/bin/packages -type f \( -name 'luci-app-traffic*.ipk' -o -name 'luci-app-traffic*.apk' \) -exec cp {} out/ \;
+          ls -la out/
+          [ -n "$(ls out/)" ] || { echo "没有产出包文件"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: out
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v1.0.0"
+          VER=$(grep -E '^PKG_VERSION' Makefile | cut -d: -f2 | tr -d ' ')
+          TAG="v${VER:-1.0.0}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "luci-app-traffic $TAG" \
+              --notes "安装包：23.05 系列 (opkg) 用 .ipk，snapshot 系列 (apk) 用 .apk。均为 all 架构，机型无关。
+
+          安装后进入 LuCI「状态 → 网络流量」。
+
+          依赖：luci-base、vnstat2（ipk/apk 会自动带上依赖提示，请确保已装 vnstat2 并配置好监测接口）。"
+          gh release upload "$TAG" out/* --repo "$GITHUB_REPOSITORY" --clobber
+          ls -la out/
