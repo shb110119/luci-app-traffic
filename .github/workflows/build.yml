@@ -13,25 +13,43 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: snapshot-apk
-            base: https://downloads.openwrt.org/snapshots/targets/x86/64/
-          - name: 23.05-ipk
-            base: https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/
+  # ---------------------------------------------------------------------------
+  # ipk：OpenWrt 23.05 及以下（opkg）使用
+  # 本包是纯 LuCI 资源包，不含任何需编译的代码，因此不需要 SDK，
+  # 直接按 ipk 格式（ar + control.tar.gz + data.tar.gz）打包，秒级完成。
+  # ---------------------------------------------------------------------------
+  ipk:
+    name: ipk (OpenWrt 23.05 / opkg)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 定位并下载 OpenWrt SDK
+      - name: 打包 ipk
+        run: sh .github/scripts/build-ipk.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipk
+          path: out/*.ipk
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # apk：OpenWrt snapshot / 24.10+（apk）使用
+  # apk 需要签名才能被默认信任，必须用官方 SDK 生成，故保留 SDK 流程。
+  # ---------------------------------------------------------------------------
+  apk:
+    name: apk (snapshot / apk-tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 定位并下载 OpenWrt snapshot SDK
         run: |
-          FILE=$(curl -sL "${{ matrix.base }}" | grep -oE 'openwrt-sdk-[^"]*\.(tar\.xz|tar\.zst)' | sort -u | tail -1)
+          BASE="https://downloads.openwrt.org/snapshots/targets/x86/64/"
+          FILE=$(curl -sL "$BASE" | grep -oE 'openwrt-sdk-[^"]*\.(tar\.xz|tar\.zst)' | sort -u | tail -1)
           [ -n "$FILE" ] || { echo "未找到 SDK 文件"; exit 1; }
           echo "SDK 文件: $FILE"
-          curl -sL -o sdk.tar "${{ matrix.base }}$FILE"
+          curl -sL -o sdk.tar "$BASE$FILE"
           case "$FILE" in
             *.zst) tar --zstd -xf sdk.tar ;;
             *)     tar -xJf sdk.tar ;;
@@ -45,19 +63,6 @@ jobs:
             cp -a "$item" sdk/package/luci-app-traffic/
           done
           ls -la sdk/package/luci-app-traffic/
-
-      - name: 修正 SDK 的 install 预检查（Ubuntu 24.04 的 uutils coreutils 无 "GNU" 字样）
-        run: |
-          # 23.05 的 include/prereq-build.mk 用 `install --version | grep GNU` 判定，
-          # 新版 Ubuntu runner 的 coreutils 是 Rust uutils，输出不含 "GNU"，会被误判为缺失。
-          # 只把这一行的检查命令换成 true，其余预检查照常跑（保证 staging_dir/host 正常初始化）。
-          if grep -q "install --version | grep GNU" sdk/include/prereq-build.mk; then
-            sed -i 's/install --version | grep GNU/true/g; s/ginstall --version | grep GNU/true/g' sdk/include/prereq-build.mk
-            echo "已修正："
-            grep -n -A3 "SetupHostCommand,install" sdk/include/prereq-build.mk
-          else
-            echo "该 SDK 无此检查，跳过"
-          fi
 
       - name: 更新并安装 feeds
         working-directory: sdk
@@ -76,17 +81,21 @@ jobs:
       - name: 收集产物
         run: |
           mkdir -p out
-          find sdk/bin/packages -type f \( -name 'luci-app-traffic*.ipk' -o -name 'luci-app-traffic*.apk' \) -exec cp {} out/ \;
+          find sdk/bin/packages -type f -name 'luci-app-traffic*.apk' -exec cp {} out/ \;
           ls -la out/
-          [ -n "$(ls out/)" ] || { echo "没有产出包文件"; exit 1; }
+          [ -n "$(ls out/)" ] || { echo "没有产出 apk 文件"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: out/
+          name: apk
+          path: out/*.apk
+          if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # 发布：仅在手动触发（workflow_dispatch）时创建/更新 Release
+  # ---------------------------------------------------------------------------
   release:
-    needs: build
+    needs: [ipk, apk]
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     permissions:
@@ -103,15 +112,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VER=$(grep -E '^PKG_VERSION' Makefile | cut -d: -f2 | tr -d ' ')
+          VER=$(sed -n 's/^PKG_VERSION:=//p' Makefile | head -1)
           TAG="v${VER:-1.0.0}"
+          ls -la out/
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "luci-app-traffic $TAG" \
-              --notes "安装包：23.05 系列 (opkg) 用 .ipk，snapshot 系列 (apk) 用 .apk。均为 all 架构，机型无关。
+              --notes "均为 **all 架构**，与 CPU 无关（x86 / ARM / MIPS 通用）。
 
-          安装后进入 LuCI「状态 → 网络流量」。
+- \`.ipk\` → OpenWrt 23.05 及以下（opkg 包管理）
+- \`.apk\` → OpenWrt snapshot / 24.10+（apk 包管理）
 
-          依赖：luci-base、vnstat2（请确保已安装 vnstat2 并配置好监测接口）。"
+安装后进入 LuCI「状态 → 网络流量」。依赖：luci-base、vnstat2（需已安装并配置监测接口）。"
           gh release upload "$TAG" out/* --repo "$GITHUB_REPOSITORY" --clobber
-          ls -la out/
