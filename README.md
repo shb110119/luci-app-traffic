@@ -14,15 +14,13 @@ LuCI 流量统计页：实时速率折线图 + vnStat 历史图表，专为 **PO
 
 ![最近 24 小时](docs/screenshots/history-24h.png)
 
-**按天 / 按月** —— 柱状图 + 汇总表，一眼看出每天（每月）用了多少流量，日期越近越靠前：
-
-![按天汇总](docs/screenshots/history-day.png)
+**按天 / 按月** —— 只给列表，不做图表：每天（每月）下行 / 上行 / 合计三列，按日期倒序，最新的排最上面。
 
 ## 功能
 
 - **实时速率折线图**：浏览器端每秒采样 `/sys/class/net` 计数器绘制，鼠标悬停显示读数（与老毛子流量页同样式的双色折线）
 - **动态纵轴**：刻度随当前峰值自动调整（1/1.5/2/2.5/3/4/5/6/8/10 × 10^n 档位），左侧留白自适应刻度文字宽度，不会出现 "100.00 Mbps" 被裁成 "00.00" 的情况
-- **历史图表**：24 小时（5 分钟粒度）折线 + 按日/按月柱状图，数据来自 vnStat，自动剔除建库基线假点
+- **历史图表**：24 小时（5 分钟粒度）折线，采样中断处断线并涂灰，不会在缺口上拉一条假直线；按日/按月的列表按日期倒序，数据来自 vnStat，自动剔除建库基线假点
 - **接口跟随 vnStat**：接口下拉只显示 `/etc/config/vnstat` 中勾选且有计数器的接口，勾选变化每秒自动同步
 - **汇总表**：当前 / 平均 / 最大 / 总共量值（下行、上行各一行，带颜色标识）
 - **默认接口智能选择**：优先 pon0（MAC/DMA 级计数，不受硬件加速转发影响），避免 pppoe-wan / br-lan 等软件接口在 flow offload 下的计数失真
@@ -53,8 +51,8 @@ git clone https://github.com/shb110119/luci-app-traffic feeds/luci/applications/
 ### 方式三：已有固件上直接装 ipk/apk
 
 ```bash
-apk add ./luci-app-traffic_1.0.0-1_all.apk       # OpenWrt snapshot (apk)
-opkg install ./luci-app-traffic_1.0.0-1_all.ipk  # 21.02/22.03/23.05 (opkg)
+apk add ./luci-app-traffic_1.0.3-1_all.apk       # OpenWrt snapshot (apk)
+opkg install ./luci-app-traffic_1.0.3-1_all.ipk  # 21.02/22.03/23.05 (opkg)
 ```
 
 安装后进入 **状态 → 网络流量**。
@@ -65,6 +63,7 @@ opkg install ./luci-app-traffic_1.0.0-1_all.ipk  # 21.02/22.03/23.05 (opkg)
 2. **MaxBandwidth**：`vnstat.conf` 默认 `MaxBandwidth 1000`（Mbit），2.5G PON 场景会报 "Traffic rate higher than set maximum" 导致不记账。脚本会自动改成 `2500`。
 3. **硬件加速计数失真**：开启 `flow_offloading_hw` 时，pppoe-wan / br-lan 等软件接口只统计未被 PPE 加速的包，看 pon0 才是全量。接口标签里带"加速后偏小"提示的都属于这类。
 4. **改 JS 要换文件名**：LuCI 前端用固定 URL 加载 JS 无版本号，浏览器缓存顽固，改 `overview.js` 内容时建议换名并同步 menu.d。
+5. **24 小时图右侧突然空白**：多半是 vnstatd 卡住——进程还在，但库不再更新（`vnstat -i pon0` 顶部的 "Database updated" 停在几小时前），新数据自然画不出来。执行 `/etc/init.d/vnstat restart` 即可恢复；页面底部会同时给出"最后一条采样是 xx:xx"的提示。缺口是真实丢掉的采样，不会被补画。
 
 ## 文件结构
 
