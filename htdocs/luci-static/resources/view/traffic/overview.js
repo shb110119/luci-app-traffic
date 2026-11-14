@@ -76,36 +76,6 @@ function fmtBytes(b) {
 	return (i === 0 ? b.toFixed(0) : b.toFixed(2)) + ' ' + u[i];
 }
 
-/* 字节轴的刻度文字：按 GiB/TiB 这类单位取整，避免 "33.00 GiB" 这种长标签 */
-function byteUnit(maxBytes) {
-	var u = [ [ 'B', 1 ], [ 'KiB', 1024 ], [ 'MiB', 1048576 ],
-		[ 'GiB', 1073741824 ], [ 'TiB', 1099511627776 ] ];
-	var k = 0;
-
-	for (var i = 0; i < u.length; i++)
-		if (maxBytes >= u[i][1]) k = i;
-
-	return u[k];
-}
-
-function fmtNum(v) {
-	if (v >= 100) return v.toFixed(0);
-	if (v >= 10) return (Math.round(v * 10) / 10).toString();
-	return (Math.round(v * 100) / 100).toString();
-}
-
-/* 按天/按月柱状图的纵轴：单位 + 凑整上限 + 刻度等分 + 刻度格式化 */
-function makeByteAxis(maxBytes) {
-	var u = byteUnit(maxBytes);
-	var s = niceMax(maxBytes / u[1]);
-
-	return {
-		nmax: s * u[1],
-		divs: axisDivs(s),
-		fmt: function(b) { return fmtNum(b / u[1]) + ' ' + u[0]; }
-	};
-}
-
 /* 纵轴上限：把表内峰值向上凑整到 1/1.5/2/2.5/3/4/5/6/8/10 × 10^n，曲线至少占约 67% 高度 */
 function niceMax(v) {
 	if (!(v > 0)) return 1000;
@@ -246,7 +216,6 @@ return view.extend({
 		/* 当前图上的数据点横坐标（画布内部坐标） */
 		function xAt(p) {
 			if (!gh) return 0;
-			if (gh.mode === 'bar') return p.cx;
 			if (gh.mode === 'rt')
 				return gh.ax.padL + gh.ax.pw - ((gh.now - p.t) / gh.span) * gh.ax.pw;
 			return gh.ax.padL + ((p.t - gh.t0) / (gh.t1 - gh.t0)) * gh.ax.pw;
@@ -313,13 +282,9 @@ return view.extend({
 
 			g.restore();
 
-			var tm;
-			var fv = gh.mode === 'bar' ? fmtBytes : fmtRate;
+			var tm, fv = fmtRate;
 
-			if (gh.mode === 'bar') {
-				tm = p.key;
-			}
-			else if (gh.mode === 'rt') {
+			if (gh.mode === 'rt') {
 				var d = new Date(p.t);
 				tm = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
 			}
@@ -510,6 +475,18 @@ return view.extend({
 
 						if (xLast < pL + gpw - 0.5)
 							g.fillRect(xLast, pT, pL + gpw - xLast, gph);
+
+						/* 中间的大缺口也涂灰，免得被当成一段长直线 */
+						for (var k = 1; k < pts.length; k++) {
+							if (pts[k].t - pts[k - 1].t <= interval * 3)
+								continue;
+
+							var xa = pL + ((pts[k - 1].t - t0) / (t1 - t0)) * gpw;
+							var xb = pL + ((pts[k].t - t0) / (t1 - t0)) * gpw;
+
+							if (xb - xa > 1)
+								g.fillRect(xa, pT, xb - xa, gph);
+						}
 					}
 				}
 			}
@@ -527,16 +504,26 @@ return view.extend({
 				return;
 			}
 
+			/* 采样中断（vnstatd 卡住 / 路由器断电）时不要在缺口上拉一条直线，
+			   每个连续片段单独起笔，缺口处断开 */
+			var BREAK = interval * 3;
+
 			function line(key, color) {
 				g.beginPath();
 				g.strokeStyle = color;
 				g.fillStyle = color;
 				g.lineWidth = 2;
 				g.lineJoin = 'round';
-				pts.forEach(function(p, idx) {
+
+				var prev = null;
+				pts.forEach(function(p) {
 					var x = ax.padL + ((p.t - t0) / (t1 - t0)) * ax.pw;
 					var y = ax.padT + ax.ph - (Math.min(p[key], nmax) / nmax) * ax.ph;
-					idx ? g.lineTo(x, y) : g.moveTo(x, y);
+
+					if (prev !== null && (p.t - prev) <= BREAK) g.lineTo(x, y);
+					else g.moveTo(x, y);
+
+					prev = p.t;
 				});
 				g.stroke();
 
@@ -573,119 +560,12 @@ return view.extend({
 			gh = { mode: 'hist', pts: pts, ax: ax, t0: t0, t1: t1, interval: interval, ymax: nmax };
 		}
 
-		/* 按天 / 按月：每个周期一组「下行 / 上行」柱，纵轴单位随量级自动切 GiB/TiB */
-		function drawListChart() {
-			var c = prepCanvas(), g = c.g;
-
-			if (state.histLoading || !state.rows || !state.rows.length) {
-				gh = null;
-				g.fillStyle = 'rgba(128,128,128,1)';
-				g.font = '13px sans-serif';
-				g.textAlign = 'center';
-				g.textBaseline = 'middle';
-				g.fillText(state.histLoading ? '加载中…' : '该时段暂无数据', c.w / 2, c.h / 2);
-				return;
-			}
-
-			var flip = FLIP[state.iface];
-
-			/* 后端按「越近越靠前」返回，画图要老 → 新，横轴从左到右 */
-			var rows = state.rows.slice().reverse();
-
-			var pts = rows.map(function(r, i) {
-				var rx = +r.rx || 0, tx = +r.tx || 0;
-
-				return {
-					t: i,
-					key: r.key,
-					down: flip ? tx : rx,
-					up: flip ? rx : tx,
-					cx: 0
-				};
-			});
-
-			var ymax = 0;
-			pts.forEach(function(p) { ymax = Math.max(ymax, p.down, p.up); });
-
-			var ba = makeByteAxis(ymax);
-			var padL = axisPadL(g, ba.nmax, ba.fmt, ba.divs);
-			var ax = gridAndAxis(g, c.w, c.h, ba.nmax, [], padL, ba.fmt, ba.divs);
-
-			if (ax.pw < 20) { gh = null; return; }
-
-			var n = pts.length;
-			var slot = ax.pw / n;
-			var bw = Math.max(5, Math.min(slot * 0.32, 46));
-			var gap = bw > 14 ? 3 : 1;
-			var base = ax.padT + ax.ph;
-
-			/* 横轴标签：点太多就隔几个显示，避免糊成一片 */
-			var step = Math.ceil(n / Math.max(2, Math.floor(ax.pw / 60)));
-			step = Math.max(1, step);
-
-			g.font = '11px sans-serif';
-			g.textAlign = 'center';
-			g.textBaseline = 'top';
-
-			pts.forEach(function(p, i) {
-				p.cx = ax.padL + slot * (i + 0.5);
-
-				if (i % step === 0 || i === n - 1) {
-					g.fillStyle = 'rgba(128,128,128,1)';
-
-					var lab = state.tab === 'month' ? p.key : p.key.slice(5);
-					g.fillText(lab, p.cx, ax.padT + ax.ph + 8);
-				}
-			});
-
-			/* 柱体：下行在左、上行在右 */
-			pts.forEach(function(p) {
-				[ [ 'down', COL_DOWN, -1 ], [ 'up', COL_UP, 1 ] ].forEach(function(s) {
-					var v = Math.min(p[s[0]], ba.nmax);
-					var hbar = (v / ba.nmax) * ax.ph;
-					var x = p.cx + s[2] * (bw + gap) / 2 - bw / 2;
-
-					if (hbar > 0.5) {
-						g.fillStyle = s[1];
-						g.fillRect(x, base - hbar, bw, hbar);
-					}
-				});
-			});
-
-			/* 柱顶数值：周期数少的时候直接标在各自柱子上方，省得去数刻度 */
-			if (n <= 10) {
-				g.font = '10px sans-serif';
-				g.textBaseline = 'bottom';
-				g.textAlign = 'center';
-
-				pts.forEach(function(p) {
-					/* 两个数值接近时标签会横向挤在一起，把上行那个往上错开一行 */
-					var td = ba.fmt(p.down), tu = ba.fmt(p.up);
-					var crowd = (g.measureText(td).width + g.measureText(tu).width) / 2 > (bw + gap);
-
-					[ [ 'down', COL_DOWN, -1, 0 ], [ 'up', COL_UP, 1, crowd ? 12 : 0 ] ].forEach(function(s) {
-						var v = p[s[0]];
-
-						if (!(v > 0)) return;
-
-						var hbar = (Math.min(v, ba.nmax) / ba.nmax) * ax.ph;
-						var x = p.cx + s[2] * (bw + gap) / 2;
-
-						g.fillStyle = s[1];
-						g.fillText(ba.fmt(v), x, base - hbar - 3 - s[3]);
-					});
-				});
-			}
-
-			gh = { mode: 'bar', pts: pts, ax: ax, ymax: ba.nmax, fmt: ba.fmt, t0: 0, t1: 1 };
-		}
-
 		function draw() {
 			gh = null;
 
 			if (state.tab === 'rt') drawRt();
 			else if (state.tab === '24h') drawHist();
-			else drawListChart();
+			/* 按天 / 按月只出表格，不画图 */
 
 			paintHover();
 		}
@@ -770,7 +650,10 @@ return view.extend({
 			while (histTbody.firstChild)
 				histTbody.removeChild(histTbody.firstChild);
 
-			var rows = state.rows || [];
+			var rows = (state.rows || []).slice().sort(function(a, b) {
+				/* 日期键是 YYYY-MM-DD / YYYY-MM，字符串比较即可；越近越靠上 */
+				return a.key < b.key ? 1 : (a.key > b.key ? -1 : 0);
+			});
 
 			if (!rows.length) {
 				histEmpty.textContent = '该时段没有数据';
@@ -807,11 +690,17 @@ return view.extend({
 		function syncLayout() {
 			var isList = (state.tab === 'day' || state.tab === 'month');
 
-			/* 图表所有标签页都有：实时/24小时是折线，按天/按月是柱状 */
-			if (chartBox) chartBox.style.display = '';
+			/* 图表只给实时 / 24 小时用；按天 / 按月只看列表 */
+			if (chartBox) chartBox.style.display = isList ? 'none' : '';
 			if (sumTable) sumTable.style.display = isList ? 'none' : '';
 			if (histBox) histBox.style.display = isList ? '' : 'none';
 			if (winBox) winBox.style.display = state.tab === 'rt' ? '' : 'none';
+		}
+
+		function setHint(t, warn) {
+			if (!hintEl) return;
+			hintEl.textContent = t;
+			hintEl.style.color = warn ? '#e67e22' : 'rgba(128,128,128,1)';
 		}
 
 		function loadHistory() {
@@ -833,9 +722,9 @@ return view.extend({
 					syncLayout();
 					draw();
 					refreshTable();
-					hintEl.textContent = (r && r.error === 'nodb')
+					setHint((r && r.error === 'nodb')
 						? '该接口还没有历史数据，先用「实时」页看；历史统计需要 vnstat 采集一段时间后才有。'
-						: '读取历史数据失败。';
+						: '读取历史数据失败。', true);
 					return;
 				}
 
@@ -845,9 +734,9 @@ return view.extend({
 					syncLayout();
 					refreshTable();
 					draw();
-					hintEl.textContent = (range === 'day' ? '按天汇总' : '按月汇总') +
-						'，柱状图与下表均来自 vnstat；单位为 GiB/TiB，建库首' +
-						(range === 'day' ? '日' : '月') + '含建库前的接口累计。';
+					setHint((range === 'day' ? '按天汇总' : '按月汇总') +
+						'，数据来自 vnstat，按日期倒序排列（最新的在最上面）；' +
+						'建库首' + (range === 'day' ? '日' : '月') + '含建库前的接口累计。', false);
 					return;
 				}
 
@@ -861,27 +750,52 @@ return view.extend({
 				refreshTable();
 
 				var plist = r.points || [];
-				var span = '';
+				var span = '', stale = '', hole = '';
 
 				if (plist.length) {
 					var fts = plist[0].timestamp;
+					var lts = plist[plist.length - 1].timestamp + (r.interval || 300);
 					var d = new Date(fts * 1000);
 					span = '；当前 ' + plist.length + ' 个采样点，最早从 ' +
 						pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
 						pad(d.getHours()) + ':' + pad(d.getMinutes()) + ' 开始';
+
+					var gap = Math.round((now - lts) / 60);
+
+					if (gap > 15) {
+						var ld = new Date(lts * 1000);
+						stale = ' 注意：vnstat 最后一条采样是 ' + pad(ld.getHours()) + ':' + pad(ld.getMinutes()) +
+							'，已经 ' + gap + ' 分钟没有新数据，所以右侧没有曲线。多为 vnstatd 卡住，' +
+							'执行 /etc/init.d/vnstat restart 即可恢复。';
+					}
+
+					/* 中间若有较长的采样中断，也说清楚，免得被当成画图 bug */
+					var bigGap = 0, bigFrom = 0;
+
+					for (var i = 1; i < plist.length; i++) {
+						var g = plist[i].timestamp - plist[i - 1].timestamp;
+
+						if (g > bigGap) { bigGap = g; bigFrom = plist[i - 1].timestamp; }
+					}
+
+					if (bigGap > 1800) {
+						var iv = (r.interval || 300);
+						hole = '；中间 ' + hhmm(bigFrom) + '–' + hhmm(bigFrom + bigGap + iv) +
+							' 约有 ' + Math.round(bigGap / 60) + ' 分钟没有采样（当时 vnstat 没在写库）';
+					}
 				}
 				else {
 					span = '；该时段 vnstat 还没有记录到流量';
 				}
 
-				hintEl.textContent = '数据来自 vnstat（5 分钟粒度），最近 24 小时' + span +
-					'。灰色区域表示没有采集数据。';
+				setHint('数据来自 vnstat（5 分钟粒度），最近 24 小时' + span +
+					'。灰色区域表示没有采集数据' + hole + '。' + stale, !!stale);
 			}).catch(function() {
 				state.histLoading = false;
 				state.hist = { ok: false, error: 'fail' };
 				draw();
 				refreshTable();
-				hintEl.textContent = '读取历史数据失败（rpcd 未响应）。';
+				setHint('读取历史数据失败（rpcd 未响应）。', true);
 			});
 		}
 
@@ -901,7 +815,7 @@ return view.extend({
 					if (state.tab === 'rt') {
 						draw();
 						refreshTable();
-						hintEl.textContent = hintText(state.iface);
+						setHint(hintText(state.iface), false);
 					}
 					else {
 						loadHistory();
@@ -937,7 +851,7 @@ return view.extend({
 				state.rows = [];
 				state.histKey = '';
 				hover.on = false;
-				if (hintEl) hintEl.textContent = hintText(state.iface);
+				setHint(hintText(state.iface), false);
 				if (state.tab === 'rt') {
 					draw();
 					refreshTable();
@@ -985,7 +899,7 @@ return view.extend({
 				state.rows = [];
 				state.histKey = '';
 				hover.on = false;
-				if (hintEl) hintEl.textContent = hintText(state.iface);
+				setHint(hintText(state.iface), false);
 				if (state.tab === 'rt') { draw(); refreshTable(); }
 				else loadHistory();
 			}
