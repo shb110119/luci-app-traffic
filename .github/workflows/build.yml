@@ -38,16 +38,25 @@ jobs:
           esac
           mv openwrt-sdk-* sdk
 
+      - name: 放入包源码
+        run: |
+          mkdir -p sdk/package/luci-app-traffic
+          for item in Makefile LICENSE htdocs root; do
+            cp -a "$item" sdk/package/luci-app-traffic/
+          done
+          ls -la sdk/package/luci-app-traffic/
+
+      - name: 预置 GNU install 垫片（Ubuntu 24.04+ 的 uutils coreutils 无 "GNU" 字样，会挂 23.05 的 prereq 检查）
+        run: |
+          mkdir -p sdk/staging_dir/host/bin
+          printf '#!/bin/sh\ncase "$1" in\n  --version) echo "install (GNU coreutils) 9.4"; exit 0 ;;\nesac\nexec /usr/bin/install "$@"\n' > sdk/staging_dir/host/bin/install
+          chmod +x sdk/staging_dir/host/bin/install
+
       - name: 更新并安装 feeds
         working-directory: sdk
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      - name: 放入包源码
-        run: |
-          cp -a "$GITHUB_WORKSPACE" sdk/package/luci-app-traffic
-          rm -rf sdk/package/luci-app-traffic/.git sdk/package/luci-app-traffic/.github sdk/package/luci-app-traffic/docs
 
       - name: 编译 luci-app-traffic
         working-directory: sdk
@@ -76,6 +85,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -85,7 +96,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="v1.0.0"
           VER=$(grep -E '^PKG_VERSION' Makefile | cut -d: -f2 | tr -d ' ')
           TAG="v${VER:-1.0.0}"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
@@ -95,6 +105,6 @@ jobs:
 
           安装后进入 LuCI「状态 → 网络流量」。
 
-          依赖：luci-base、vnstat2（ipk/apk 会自动带上依赖提示，请确保已装 vnstat2 并配置好监测接口）。"
+          依赖：luci-base、vnstat2（请确保已安装 vnstat2 并配置好监测接口）。"
           gh release upload "$TAG" out/* --repo "$GITHUB_REPOSITORY" --clobber
           ls -la out/
