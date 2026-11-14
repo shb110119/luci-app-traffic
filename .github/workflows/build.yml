@@ -115,13 +115,15 @@ jobs:
           VER=$(sed -n 's/^PKG_VERSION:=//p' Makefile | head -1)
           TAG="v${VER:-1.0.0}"
           ls -la out/
+          NOTES=$(printf '%s\n' \
+            '均为 **all 架构**，与 CPU 无关（x86 / ARM / MIPS 通用）。' \
+            '' \
+            '- `.ipk` → OpenWrt 23.05 及以下（opkg 包管理）' \
+            '- `.apk` → OpenWrt snapshot / 24.10+（apk 包管理）' \
+            '' \
+            '安装后进入 LuCI「状态 → 网络流量」。依赖：luci-base、vnstat2。')
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "luci-app-traffic $TAG" \
-              --notes "均为 **all 架构**，与 CPU 无关（x86 / ARM / MIPS 通用）。
-
-- \`.ipk\` → OpenWrt 23.05 及以下（opkg 包管理）
-- \`.apk\` → OpenWrt snapshot / 24.10+（apk 包管理）
-
-安装后进入 LuCI「状态 → 网络流量」。依赖：luci-base、vnstat2（需已安装并配置监测接口）。"
+              --notes "$NOTES"
           gh release upload "$TAG" out/* --repo "$GITHUB_REPOSITORY" --clobber
