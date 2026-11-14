@@ -49,8 +49,16 @@ jobs:
       - name: 预置 GNU install 垫片（Ubuntu 24.04+ 的 uutils coreutils 无 "GNU" 字样，会挂 23.05 的 prereq 检查）
         run: |
           mkdir -p sdk/staging_dir/host/bin
-          printf '#!/bin/sh\ncase "$1" in\n  --version) echo "install (GNU coreutils) 9.4"; exit 0 ;;\nesac\nexec /usr/bin/install "$@"\n' > sdk/staging_dir/host/bin/install
-          chmod +x sdk/staging_dir/host/bin/install
+          rm -f sdk/staging_dir/host/bin/install
+          cat > sdk/staging_dir/host/bin/install <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            --version) echo "install (GNU coreutils) 9.4"; exit 0 ;;
+          esac
+          exec /usr/bin/install "$@"
+          EOF
+          chmod 755 sdk/staging_dir/host/bin/install
+          ls -la sdk/staging_dir/host/bin/install
 
       - name: 更新并安装 feeds
         working-directory: sdk
