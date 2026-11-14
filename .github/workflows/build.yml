@@ -46,24 +46,18 @@ jobs:
           done
           ls -la sdk/package/luci-app-traffic/
 
-      - name: 预置 GNU install 垫片 + 跳过 23.05 的 install 预检
+      - name: 修正 SDK 的 install 预检查（Ubuntu 24.04 的 uutils coreutils 无 "GNU" 字样）
         run: |
-          mkdir -p sdk/staging_dir/host/bin
-          rm -f sdk/staging_dir/host/bin/install
-          cat > sdk/staging_dir/host/bin/install <<'EOF'
-          #!/bin/sh
-          case "$1" in
-            --version) echo "install (GNU coreutils) 9.4"; exit 0 ;;
-          esac
-          exec /usr/bin/install "$@"
-          EOF
-          chmod 755 sdk/staging_dir/host/bin/install
-          ls -la sdk/staging_dir/host/bin/install
-          sdk/staging_dir/host/bin/install --version
-          echo "PATH=$PATH"
-          # Ubuntu 24.04 runner 的 coreutils 是 Rust uutils，install --version 不含 "GNU"，
-          # 23.05 的 prereq 会误判；直接标记 prereq 已完成（等价于 FORCE=1，官方允许）
-          touch sdk/staging_dir/host/.prereq-build
+          # 23.05 的 include/prereq-build.mk 用 `install --version | grep GNU` 判定，
+          # 新版 Ubuntu runner 的 coreutils 是 Rust uutils，输出不含 "GNU"，会被误判为缺失。
+          # 只把这一行的检查命令换成 true，其余预检查照常跑（保证 staging_dir/host 正常初始化）。
+          if grep -q "install --version | grep GNU" sdk/include/prereq-build.mk; then
+            sed -i 's/install --version | grep GNU/true/g; s/ginstall --version | grep GNU/true/g' sdk/include/prereq-build.mk
+            echo "已修正："
+            grep -n -A3 "SetupHostCommand,install" sdk/include/prereq-build.mk
+          else
+            echo "该 SDK 无此检查，跳过"
+          fi
 
       - name: 更新并安装 feeds
         working-directory: sdk
